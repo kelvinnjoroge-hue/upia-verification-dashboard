@@ -1,8 +1,12 @@
 name: Refresh KE_UPIA Dashboard
 
+# Schedule disabled 2026-07-24 -- the actual refresh now runs from
+# fourth-generation-capital-ltd/freshservice-reports (a paid, established org
+# repo not subject to the new-repo abuse-review hold that stalled runs here)
+# and pushes into this repo. This workflow is kept as a manual fallback only
+# (workflow_dispatch) -- do not re-add the schedule, or both jobs will race
+# to push to this same repo/branch. See project memory (2026-07-24 entry).
 on:
-  schedule:
-    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 permissions:
