@@ -20,14 +20,26 @@ Each compact entry: {"t": "<ISO8601 generatedAt, EAT offset>",
                       "agents": [<responder id>, ...],
                       "rows": [[wsIdx, catIdx, bucketIdx, hasResponder(0/1),
                                 hasFirstResponse(0/1), handlingSecsOrNull,
-                                responderIdxOrNull], ...]}
-Rows reference workspaces/categories/buckets by index (not name) and
-responders by index into that entry's own `agents` list (not the raw
-Freshservice id) purely to keep the encoding short -- none of this is an
-attempt at obfuscation.
+                                responderIdxOrNull, branchIdxOrNull,
+                                delayDriverIdxOrNull], ...]}
+Rows reference workspaces/categories/buckets/branches/delay-drivers by index
+(not name) and responders by index into that entry's own `agents` list (not
+the raw Freshservice id) purely to keep the encoding short -- none of this is
+an attempt at obfuscation. branchIdx/delayDriverIdx were added later (2026-07)
+-- older rows in already-written day-files are exactly 7 elements long;
+decoding code must treat a missing 8th/9th element as null, not error.
+
+BRANCH_WHITELIST/DELAY_DRIVERS are treated as fixed constants embedded as-is
+into every day-file/snapshot (same as BUCKETS always has been) -- if either
+list is ever edited, already-written historical rows' indices into it could
+shift meaning. Acceptable trade-off for this internal ops tool; not worth the
+complexity of freezing a list-version per day-file for how rarely a ~194-entry
+branch whitelist actually changes.
 """
 import json, os
 from datetime import datetime, timedelta
+from branch_whitelist import BRANCH_WHITELIST
+from delay_classify import DELAY_DRIVERS
 
 BUCKETS = ["resolved_approved", "returned", "declined", "in_progress", "other"]
 
@@ -36,6 +48,8 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
     ws_index = {name: i for i, name in enumerate(workspaces)}
     cat_index = {name: i for i, name in enumerate(categories)}
     bucket_index = {b: i for i, b in enumerate(BUCKETS)}
+    branch_index = {b: i for i, b in enumerate(BRANCH_WHITELIST)}
+    delay_index = {d: i for i, d in enumerate(DELAY_DRIVERS)}
     agent_ids, agent_pos = [], {}
     rows = []
     for r in records:
@@ -54,6 +68,8 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
             1 if r["hasFirstResponse"] else 0,
             r["handlingSecs"],
             responder_idx,
+            branch_index.get(r.get("branch")),
+            delay_index.get(r.get("delayDriver")),
         ])
     return {"t": generated_at_iso, "agents": agent_ids, "rows": rows}
 
@@ -65,7 +81,10 @@ def _day_file(history_dir, day_str):
 def load_day(history_dir, day_str, workspaces, categories):
     path = _day_file(history_dir, day_str)
     if not os.path.exists(path):
-        return {"workspaces": workspaces, "categories": categories, "buckets": BUCKETS, "entries": []}
+        return {
+            "workspaces": workspaces, "categories": categories, "buckets": BUCKETS,
+            "branches": BRANCH_WHITELIST, "delayDrivers": DELAY_DRIVERS, "entries": [],
+        }
     with open(path) as f:
         return json.load(f)
 

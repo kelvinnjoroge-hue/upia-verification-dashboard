@@ -251,6 +251,48 @@ body { padding: 20px 16px 48px; }
   .masthead { flex-direction: column; }
   .workspace-title, .workspace-sub, .live-row { text-align: left; justify-content: flex-start; }
 }
+
+/* extra breakdown panels (delay driver / branch / control agent / ticket listing) */
+.panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; box-shadow: var(--shadow); margin-top: 10px;
+}
+.panel h4 { font-size: 12.5px; margin: 0 0 12px; color: var(--text); font-weight: 700; }
+.bar-row { display: grid; grid-template-columns: 220px 1fr 84px; align-items: center; gap: 10px; margin-bottom: 8px; }
+.bar-label { font-size: 12px; color: var(--text-muted); white-space: normal; line-height: 1.3; }
+.bar-track { height: 14px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 4px; }
+.bar-value { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.panel-subhead {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-faint);
+  margin: 14px 0 0;
+}
+.chip-search {
+  width: 100%; padding: 7px 10px; border-radius: 8px; margin: 8px 0 8px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 12px;
+  font-family: inherit;
+}
+.chip-scroll { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; }
+.chip-columns { columns: 2 190px; column-gap: 16px; }
+.chip-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 4px 2px; border-bottom: 1px solid var(--surface-2); break-inside: avoid; font-size: 11.5px;
+}
+.chip-row .chip-name { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-row .chip-count { color: var(--text); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.chip-empty { font-size: 12px; color: var(--text-faint); padding: 8px 2px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 10px; }
+.data-table th {
+  text-align: left; padding: 7px 8px; color: var(--text-faint); font-weight: 700;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.data-table td { padding: 6px 8px; border-bottom: 1px solid var(--surface-2); }
+.data-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panel-footnote { font-size: 11px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+.ticket-listing-link {
+  font-size: 12.5px; font-weight: 600; color: var(--orange); text-decoration: none; cursor: pointer;
+}
+.ticket-listing-link:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -287,6 +329,8 @@ body { padding: 20px 16px 48px; }
 
   <div id="content"></div>
 
+  <div id="extraSections"></div>
+
   <div class="footer" id="footerNote">
     Tickets created today (EAT) across KE_UPIA_Verification, KE_UPIA_Edit Bio Data,
     KE_UPIA_Dormant Reactivation and KE_UPIA_Reference Check, captured every 15 minutes.
@@ -310,10 +354,51 @@ const state = {
   unavailableReason: null,
 };
 
+const SESSION_KEY_PREFIX = 'upiaDash:';
+
+function restoreFilterState() {
+  try {
+    const savedWs = JSON.parse(sessionStorage.getItem(SESSION_KEY_PREFIX + 'workspace') || 'null');
+    const savedCat = JSON.parse(sessionStorage.getItem(SESSION_KEY_PREFIX + 'category') || 'null');
+    if (Array.isArray(savedWs)) {
+      const valid = savedWs.filter(w => SNAPSHOT.workspaces.includes(w));
+      if (valid.length) state.workspace = new Set(valid);
+    }
+    if (Array.isArray(savedCat)) {
+      const valid = savedCat.filter(c => SNAPSHOT.categories.includes(c));
+      if (valid.length) state.category = new Set(valid);
+    }
+  } catch (e) { /* sessionStorage unavailable -- keep defaults */ }
+}
+
+function saveFilterState() {
+  try {
+    sessionStorage.setItem(SESSION_KEY_PREFIX + 'workspace', JSON.stringify([...state.workspace]));
+    sessionStorage.setItem(SESSION_KEY_PREFIX + 'category', JSON.stringify([...state.category]));
+  } catch (e) { /* ignore */ }
+}
+
+function isViewingLive() {
+  const latest = SNAPSHOT.recent[SNAPSHOT.recent.length - 1];
+  return !!(state.selectedEntry && latest && state.selectedEntry.t === latest.t);
+}
+
+function scheduleAutoRefresh() {
+  // Builds land roughly every 15 min -- recheck every 5 so an open tab picks up
+  // fresh data within a third of a cycle. Skip the reload while the viewer is
+  // browsing a historical snapshot so we don't yank them back to "now".
+  setInterval(() => {
+    if (!isViewingLive()) return;
+    saveFilterState();
+    location.reload();
+  }, 5 * 60 * 1000);
+}
+
 function decodeEntry(entry) {
   if (!entry) return [];
   return entry.rows.map(row => {
-    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx] = row;
+    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx, branchIdx, delayIdx] = row;
+    const responderId = responderIdx != null ? entry.agents[responderIdx] : null;
     return {
       workspace: SNAPSHOT.workspaces[wsIdx],
       category: SNAPSHOT.categories[catIdx],
@@ -321,7 +406,10 @@ function decodeEntry(entry) {
       hasResponder: !!hasResponder,
       hasFirstResponse: !!hasFirstResponse,
       handlingSecs: handlingSecs,
-      responder: responderIdx != null ? entry.agents[responderIdx] : null,
+      responder: responderId,
+      responderName: (responderId != null && SNAPSHOT.agentDirectory) ? (SNAPSHOT.agentDirectory[String(responderId)] || null) : null,
+      branch: (branchIdx != null && SNAPSHOT.branches) ? SNAPSHOT.branches[branchIdx] : null,
+      delayDriver: (delayIdx != null && SNAPSHOT.delayDrivers) ? SNAPSHOT.delayDrivers[delayIdx] : null,
     };
   });
 }
@@ -551,13 +639,247 @@ function tile(label, value, opts) {
   </div>`;
 }
 
+function barRow(label, count, maxCount, color) {
+  const pct = maxCount ? (count / maxCount * 100) : 0;
+  return `<div class="bar-row">
+    <div class="bar-label">${label}</div>
+    <div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%; background:${color}"></div></div>
+    <div class="bar-value">${count}</div>
+  </div>`;
+}
+
+function chipRow(name, count) {
+  return `<div class="chip-row"><span class="chip-name">${name}</span><span class="chip-count">${count}</span></div>`;
+}
+
+function computeBranchBreakdown(records) {
+  const verificationOnly = records.filter(r => r.workspace === 'KE_UPIA_Verification');
+  const counts = new Map();
+  let excluded = 0;
+  verificationOnly.forEach(r => {
+    if (r.branch) counts.set(r.branch, (counts.get(r.branch) || 0) + 1);
+    else excluded++;
+  });
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  return { sorted, excluded, total: verificationOnly.length };
+}
+
+function computeAgentBreakdown(records) {
+  const stats = new Map();
+  records.forEach(r => {
+    if (!r.hasResponder) return;
+    const name = r.responderName || `Agent ${r.responder}`;
+    if (!stats.has(name)) stats.set(name, { allocated: 0, resolvedApproved: 0, handlingSum: 0, handlingCount: 0 });
+    const s = stats.get(name);
+    s.allocated++;
+    if (r.bucket === 'resolved_approved') s.resolvedApproved++;
+    if (r.handlingSecs != null) { s.handlingSum += r.handlingSecs; s.handlingCount++; }
+  });
+  const rows = [...stats.entries()].map(([name, s]) => ({
+    name, allocated: s.allocated, resolvedApproved: s.resolvedApproved,
+    avgHandlingSecs: s.handlingCount ? s.handlingSum / s.handlingCount : null,
+  }));
+  rows.sort((a, b) => b.allocated - a.allocated);
+  return rows;
+}
+
+function computeDelayDriverBreakdown(records) {
+  const eligible = records.filter(r => r.delayDriver);
+  const counts = new Map();
+  const handling = new Map();
+  eligible.forEach(r => {
+    counts.set(r.delayDriver, (counts.get(r.delayDriver) || 0) + 1);
+    if (r.handlingSecs != null) {
+      const h = handling.get(r.delayDriver) || { sum: 0, count: 0 };
+      h.sum += r.handlingSecs; h.count++;
+      handling.set(r.delayDriver, h);
+    }
+  });
+  const total = eligible.length;
+  const rows = [...counts.entries()].map(([label, count]) => {
+    const h = handling.get(label);
+    return {
+      label, count, share: total ? (count / total * 100) : 0,
+      avgHandlingSecs: (h && h.count) ? h.sum / h.count : null,
+    };
+  });
+  rows.sort((a, b) => b.count - a.count);
+  return { rows, total };
+}
+
+function renderDelayDriverPanel(records) {
+  const { rows, total } = computeDelayDriverBreakdown(records);
+  if (total === 0) {
+    return `<div class="panel"><h4>Delay Driver &mdash; New Loan Verification</h4>
+      <div class="chip-empty">No classified New Loan Verification tickets for this selection yet.
+      Classification only runs on resolved tickets and catches up gradually (a handful per refresh cycle)
+      rather than all at once.</div></div>`;
+  }
+  const maxCount = rows[0].count;
+  const bars = rows.map(r => barRow(r.label, r.count, maxCount, 'var(--purple)')).join('');
+  const tableRows = rows.map(r => `<tr>
+    <td>${r.label}</td>
+    <td class="num">${r.count}</td>
+    <td class="num">${r.share.toFixed(1)}%</td>
+    <td class="num">${fmtDuration(r.avgHandlingSecs)}</td>
+  </tr>`).join('');
+  return `<div class="panel">
+    <h4>Delay Driver &mdash; New Loan Verification (${total} resolved ticket(s) classified)</h4>
+    ${bars}
+    <table class="data-table">
+      <thead><tr><th>Delay driver</th><th>Tickets</th><th>Share</th><th>Avg duration</th></tr></thead>
+      <tbody>${tableRows}</tbody>
+    </table>
+    <div class="panel-footnote">Approximate keyword heuristic read from each ticket's conversation thread,
+    not manual case-by-case review. Only resolved/closed/approved New Loan Verification tickets are
+    classified, and classification catches up gradually after any pause rather than all at once.</div>
+  </div>`;
+}
+
+function renderBranchPanel(records) {
+  const { sorted, excluded, total } = computeBranchBreakdown(records);
+  if (sorted.length === 0) {
+    return `<div class="panel"><h4>Branches by Ticket Volume</h4>
+      <div class="chip-empty">No branch data for this selection &mdash; only KE_UPIA_Verification
+      tickets carry a branch field.</div></div>`;
+  }
+  const top = sorted.slice(0, 10);
+  const maxCount = top[0][1];
+  const bars = top.map(([name, count]) => barRow(name, count, maxCount, 'var(--navy)')).join('');
+  const chips = sorted.map(([name, count]) => chipRow(name, count)).join('');
+  return `<div class="panel">
+    <h4>Branches by Ticket Volume (${sorted.length} branches)</h4>
+    ${bars}
+    <p class="panel-subhead">All ${sorted.length} branches</p>
+    <input class="chip-search" data-chip-target="branch" type="text" placeholder="Filter branches&hellip;">
+    <div class="chip-scroll"><div class="chip-columns" id="branchChips">${chips}</div></div>
+    <div class="panel-footnote">${excluded} of ${total} Verification ticket(s) had no branch recorded
+    or a value that didn't match the approved branch list, and are excluded above.</div>
+  </div>`;
+}
+
+function renderAgentPanel(records) {
+  const rows = computeAgentBreakdown(records);
+  if (rows.length === 0) {
+    return `<div class="panel"><h4>Control Agents by Ticket Volume</h4>
+      <div class="chip-empty">No agent data for this selection.</div></div>`;
+  }
+  const top = rows.slice(0, 10);
+  const maxCount = top[0].allocated;
+  const bars = top.map(r => barRow(r.name, r.allocated, maxCount, 'var(--orange)')).join('');
+  const tableRows = rows.map(r => `<tr>
+    <td>${r.name}</td>
+    <td class="num">${r.allocated}</td>
+    <td class="num">${fmtDuration(r.avgHandlingSecs)}</td>
+    <td class="num">${r.resolvedApproved}</td>
+  </tr>`).join('');
+  return `<div class="panel">
+    <h4>Control Agents by Ticket Volume (${rows.length} agents)</h4>
+    ${bars}
+    <p class="panel-subhead">All ${rows.length} agents</p>
+    <input class="chip-search" data-chip-target="agent" type="text" placeholder="Filter agents&hellip;">
+    <div class="chip-scroll" style="max-height:280px;">
+      <table class="data-table" id="agentTable">
+        <thead><tr><th>Control agent</th><th>Total tickets allocated</th><th>Avg resolution time</th><th>Total resolved/approved</th></tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function renderTicketListingSection() {
+  if (CAN_FETCH_HISTORY) {
+    return `<div class="panel">
+      <h4>Ticket Listing</h4>
+      <a class="ticket-listing-link" id="ticketListingLink">View today&rsquo;s full ticket listing &rarr;</a>
+      <div id="ticketListingBody"></div>
+    </div>`;
+  }
+  return `<div class="panel">
+    <h4>Ticket Listing</h4>
+    <div class="chip-empty">The full per-ticket listing is only available on the
+    <a href="${SNAPSHOT.mirrorUrl}" target="_blank" rel="noopener">public mirror</a> &mdash;
+    this static view doesn't embed per-ticket detail to keep its size reasonable.</div>
+  </div>`;
+}
+
+function loadTicketListing() {
+  const body = document.getElementById('ticketListingBody');
+  const todayStr = eatDateString(Date.now());
+  body.innerHTML = '<div class="chip-empty">Loading&hellip;</div>';
+  fetch(`tickets/${todayStr}.json`)
+    .then(r => { if (!r.ok) throw new Error('fetch failed'); return r.json(); })
+    .then(data => {
+      const tickets = data.tickets || [];
+      if (!tickets.length) {
+        body.innerHTML = '<div class="chip-empty">No tickets found for today.</div>';
+        return;
+      }
+      const esc = s => (s || '').replace(/</g, '&lt;');
+      const rows = tickets.map(t => `<tr>
+        <td class="num">${t.id}</td>
+        <td>${esc(t.subject)}</td>
+        <td>${esc(t.workspace)}</td>
+        <td>${t.branch || '&mdash;'}</td>
+        <td>${t.agent || '&mdash;'}</td>
+        <td class="num">${fmtDuration(t.handlingSecs)}</td>
+        <td>${t.delayDriver || '&mdash;'}</td>
+      </tr>`).join('');
+      body.innerHTML = `<div class="chip-scroll" style="max-height:420px;">
+        <table class="data-table">
+          <thead><tr><th>ID</th><th>Subject</th><th>Workspace</th><th>Branch</th><th>Agent</th><th>Duration</th><th>Delay driver</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    })
+    .catch(() => { body.innerHTML = '<div class="chip-empty">Could not load the ticket listing &mdash; try again in a moment.</div>'; });
+}
+
+function wireSearchFilter(inputEl, containerEl, rowSelector) {
+  if (!inputEl || !containerEl) return;
+  inputEl.addEventListener('input', () => {
+    const q = inputEl.value.trim().toLowerCase();
+    containerEl.querySelectorAll(rowSelector).forEach(row => {
+      row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+}
+
+function renderExtraSections(filtered) {
+  const container = document.getElementById('extraSections');
+  container.innerHTML = `
+    <div class="section-label">Delay Driver</div>
+    ${renderDelayDriverPanel(filtered)}
+    <div class="section-label">Branches</div>
+    ${renderBranchPanel(filtered)}
+    <div class="section-label">Control Agents</div>
+    ${renderAgentPanel(filtered)}
+    <div class="section-label">Ticket Listing</div>
+    ${renderTicketListingSection()}
+  `;
+  wireSearchFilter(container.querySelector('.chip-search[data-chip-target="branch"]'), document.getElementById('branchChips'), '.chip-row');
+  wireSearchFilter(container.querySelector('.chip-search[data-chip-target="agent"]'), document.getElementById('agentTable'), 'tbody tr');
+  const listingLink = document.getElementById('ticketListingLink');
+  if (listingLink) {
+    listingLink.addEventListener('click', () => {
+      const body = document.getElementById('ticketListingBody');
+      if (!body.dataset.loaded) {
+        body.dataset.loaded = '1';
+        loadTicketListing();
+      }
+    });
+  }
+}
+
 function render() {
   updateChipStyles();
   updateDatetimeStatus();
   const content = document.getElementById('content');
+  const extraContainer = document.getElementById('extraSections');
 
   if (state.loading) {
     content.innerHTML = '<div class="history-unavailable">Loading historical snapshot&hellip;</div>';
+    extraContainer.innerHTML = '';
     return;
   }
   if (state.unavailable) {
@@ -567,6 +889,7 @@ function render() {
       'no-fetch': `This time is outside the recent window embedded in this static view. <a href="${SNAPSHOT.mirrorUrl}" target="_blank" rel="noopener">Open the public mirror</a> for full history.`,
     };
     content.innerHTML = `<div class="history-unavailable">${messages[state.unavailableReason] || messages['no-data']}</div>`;
+    extraContainer.innerHTML = '';
     return;
   }
 
@@ -577,6 +900,7 @@ function render() {
 
   if (filtered.length === 0) {
     content.innerHTML = '<div class="empty-note">No tickets for this selection at the chosen time.</div>';
+    renderExtraSections([]);
     return;
   }
 
@@ -609,12 +933,16 @@ function render() {
     <div class="section-label">Workforce</div>
     <div class="tile-grid">${workforce}</div>
   `;
+
+  renderExtraSections(filtered);
 }
 
 buildChipRow('workspaceRow', SNAPSHOT.workspaces, 'workspace');
 buildChipRow('categoryRow', SNAPSHOT.categories, 'category');
 initDatetimeFilter();
+restoreFilterState();
 render();
+scheduleAutoRefresh();
 </script>
 </body>
 </html>

@@ -29,6 +29,8 @@ from datetime import datetime, timezone, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import history_store as hstore
+from branch_whitelist import canonical_branch
+from delay_classify import classify as classify_delay_driver
 
 EAT = timezone(timedelta(hours=3))
 API_KEY = os.environ.get("FS_API_KEY")
@@ -63,6 +65,10 @@ RETENTION_DAYS = 30
 RECENT_WINDOW_HOURS = 24
 
 _REQUEST_PACING_SECS = 0.3
+
+CLASSIFICATION_CACHE_NAME = "delay_classifications.json"
+NLV_SUB_CATEGORY = "New Loan Verification"
+MAX_NEW_CLASSIFICATIONS_PER_RUN = 150
 
 
 def categorize(subject):
@@ -128,7 +134,7 @@ def fetch_today_tickets_for_workspace(workspace_id, today_start):
     page = 1
     while True:
         data = _api_get(
-            f"/api/v2/tickets?workspace_id={workspace_id}&include=stats"
+            f"/api/v2/tickets?workspace_id={workspace_id}&include=stats,requester"
             f"&order_by=created_at&order_type=desc&per_page=100&page={page}"
         )
         batch = data.get("tickets", [])
@@ -149,17 +155,104 @@ def fetch_today_tickets_for_workspace(workspace_id, today_start):
 
 
 def fetch_today_tickets():
+    # Freshservice's offset/page pagination is only stable when the sort key
+    # (created_at) is unique across the boundary -- two tickets created in the
+    # same second can straddle a page split and come back on both pages.
+    # Dedupe by id defensively rather than assume that never happens.
     today_start = datetime.now(EAT).replace(hour=0, minute=0, second=0, microsecond=0)
     all_tickets = []
+    seen_ids = set()
     for ws in WORKSPACES:
         tickets = fetch_today_tickets_for_workspace(ws["id"], today_start)
         for t in tickets:
+            if t["id"] in seen_ids:
+                continue
+            seen_ids.add(t["id"])
             t["_workspace_name"] = ws["name"]
-        all_tickets.extend(tickets)
+            all_tickets.append(t)
     return all_tickets, today_start
 
 
-def to_records(tickets):
+def fetch_agent_directory():
+    directory = {}
+    page = 1
+    while True:
+        data = _api_get(f"/api/v2/agents?per_page=100&page={page}")
+        batch = data.get("agents", [])
+        if not batch:
+            break
+        for a in batch:
+            name = f"{(a.get('first_name') or '').strip()} {(a.get('last_name') or '').strip()}".strip()
+            directory[str(a["id"])] = name or f"Agent {a['id']}"
+        if len(batch) < 100:
+            break
+        page += 1
+    return directory
+
+
+def fetch_conversation_text(ticket_id):
+    texts = []
+    page = 1
+    while True:
+        data = _api_get(f"/api/v2/tickets/{ticket_id}/conversations?per_page=100&page={page}")
+        batch = data.get("conversations", [])
+        texts.extend(c.get("body_text") or "" for c in batch)
+        if not data.get("meta", {}).get("has_more"):
+            break
+        page += 1
+    return "\n".join(texts)
+
+
+def _classification_cache_path(base_dir):
+    return os.path.join(base_dir, CLASSIFICATION_CACHE_NAME)
+
+
+def load_classification_cache(base_dir):
+    path = _classification_cache_path(base_dir)
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_classification_cache(base_dir, cache):
+    with open(_classification_cache_path(base_dir), "w") as f:
+        json.dump(cache, f, separators=(",", ":"))
+
+
+def prune_classification_cache(cache, retention_days, now):
+    cutoff = now - timedelta(days=retention_days)
+    return {
+        ticket_id: entry for ticket_id, entry in cache.items()
+        if datetime.fromisoformat(entry["classified_at"]) >= cutoff
+    }
+
+
+def classify_delay_drivers(records, base_dir, now):
+    cache = prune_classification_cache(load_classification_cache(base_dir), RETENTION_DAYS, now)
+    new_count = 0
+    for r in records:
+        if r["subCategory"] != NLV_SUB_CATEGORY or r["bucket"] != "resolved_approved":
+            continue
+        key = str(r["id"])
+        cached = cache.get(key)
+        if cached:
+            r["delayDriver"] = cached["label"]
+            continue
+        if new_count >= MAX_NEW_CLASSIFICATIONS_PER_RUN:
+            continue
+        text = fetch_conversation_text(r["id"])
+        label = classify_delay_driver(text)
+        r["delayDriver"] = label
+        cache[key] = {"label": label, "classified_at": now.isoformat()}
+        new_count += 1
+    save_classification_cache(base_dir, cache)
+    print(f"  [delay-driver] classified {new_count} new ticket(s) this run "
+          f"(cache now holds {len(cache)} entries)")
+    return records
+
+
+def to_records(tickets, agent_directory):
     records = []
     for t in tickets:
         stats = t.get("stats") or {}
@@ -167,27 +260,73 @@ def to_records(tickets):
         responder = t.get("responder_id")
         resolved_at = stats.get("resolved_at")
         resolution_secs = stats.get("resolution_time_in_secs")
+        cf = t.get("custom_fields") or {}
+        requester = t.get("requester") or {}
         records.append({
+            "id": t["id"],
+            "subject": t.get("subject"),
             "workspace": t["_workspace_name"],
             "category": categorize(t.get("subject")),
+            "subCategory": t.get("sub_category"),
+            "branch": canonical_branch(cf.get("branch")),
             "bucket": bucket_for(status),
             "hasResponder": responder is not None,
             "responder": responder,
+            "responderName": agent_directory.get(str(responder)) if responder else None,
+            "requesterName": requester.get("name"),
             "hasFirstResponse": stats.get("first_responded_at") is not None,
+            "createdAt": t.get("created_at"),
+            "resolvedAt": resolved_at,
             "handlingSecs": resolution_secs if (resolved_at and resolution_secs is not None) else None,
+            "delayDriver": None,
         })
     return records
 
 
+def write_ticket_listing(records, base_dir, day_str):
+    tickets_dir = os.path.join(base_dir, "tickets")
+    os.makedirs(tickets_dir, exist_ok=True)
+    payload = {
+        "generatedAt": datetime.now(EAT).isoformat(),
+        "tickets": [
+            {
+                "id": r["id"],
+                "subject": r["subject"],
+                "workspace": r["workspace"],
+                "category": r["category"],
+                "subCategory": r["subCategory"],
+                "branch": r["branch"],
+                "bucket": r["bucket"],
+                "agent": r["responderName"],
+                "requester": r["requesterName"],
+                "createdAt": r["createdAt"],
+                "resolvedAt": r["resolvedAt"],
+                "handlingSecs": r["handlingSecs"],
+                "delayDriver": r["delayDriver"],
+            }
+            for r in records
+        ],
+    }
+    with open(os.path.join(tickets_dir, f"{day_str}.json"), "w") as f:
+        json.dump(payload, f, separators=(",", ":"))
+
+
 def build_snapshot():
+    now = datetime.now(EAT)
+
+    print("[upia-verification] Fetching agent directory...")
+    agent_directory = fetch_agent_directory()
+
     tickets, today_start = fetch_today_tickets()
-    records = to_records(tickets)
+    records = to_records(tickets, agent_directory)
     other = [r for r in records if r["bucket"] == "other"]
     if other:
         print(f"  [warn] {len(other)} ticket(s) have a status outside the known set -- "
               f"excluded from the outcome buckets but still counted in Received.")
 
-    now = datetime.now(EAT)
+    print("[upia-verification] Classifying delay drivers for resolved New Loan Verification tickets...")
+    records = classify_delay_drivers(records, HERE, now)
+
     workspace_names = [w["name"] for w in WORKSPACES]
     entry = hstore.compact_entry(now.isoformat(), records, workspace_names, CATEGORIES)
 
@@ -196,12 +335,17 @@ def build_snapshot():
     available_days = hstore.update_index(HISTORY_DIR, day_str, RETENTION_DAYS)
     recent = hstore.recent_window(HISTORY_DIR, now, workspace_names, CATEGORIES, RECENT_WINDOW_HOURS)
 
+    write_ticket_listing(records, HERE, day_str)
+
     return {
         "generatedAt": now.isoformat(),
         "windowStart": today_start.isoformat(),
         "categories": CATEGORIES,
         "workspaces": workspace_names,
         "buckets": BUCKETS,
+        "branches": hstore.BRANCH_WHITELIST,
+        "delayDrivers": hstore.DELAY_DRIVERS,
+        "agentDirectory": agent_directory,
         "recent": recent,
         "availableDays": available_days,
         "mirrorUrl": MIRROR_URL,
