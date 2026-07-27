@@ -35,7 +35,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html history/
+          git add index.html history/ delay_classifications.json tickets/
           if ! git diff --staged --quiet; then
             git commit -m "Refresh dashboard $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             git push
