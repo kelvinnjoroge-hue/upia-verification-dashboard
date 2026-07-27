@@ -43,6 +43,15 @@ from delay_classify import DELAY_DRIVERS
 
 BUCKETS = ["resolved_approved", "returned", "declined", "in_progress", "other"]
 
+# Which ticket population a delay-driver classification belongs to -- the
+# classifier's 5 labels are reused verbatim across groups (calibrated against
+# real conversation samples for each before adding), but each group gets its
+# own breakdown panel client-side rather than mixing counts together (they're
+# answering different questions: "why do NLV tickets take long" vs "why do
+# Dormant Reactivation tickets take long"). Extend this list, not replace it,
+# if a future group is added.
+DELAY_DRIVER_GROUPS = ["New Loan Verification", "Dormant Reactivation"]
+
 
 def compact_entry(generated_at_iso, records, workspaces, categories):
     ws_index = {name: i for i, name in enumerate(workspaces)}
@@ -50,6 +59,7 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
     bucket_index = {b: i for i, b in enumerate(BUCKETS)}
     branch_index = {b: i for i, b in enumerate(BRANCH_WHITELIST)}
     delay_index = {d: i for i, d in enumerate(DELAY_DRIVERS)}
+    group_index = {g: i for i, g in enumerate(DELAY_DRIVER_GROUPS)}
     agent_ids, agent_pos = [], {}
     rows = []
     for r in records:
@@ -70,6 +80,7 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
             responder_idx,
             branch_index.get(r.get("branch")),
             delay_index.get(r.get("delayDriver")),
+            group_index.get(r.get("delayDriverGroup")),
         ])
     return {"t": generated_at_iso, "agents": agent_ids, "rows": rows}
 
@@ -83,7 +94,8 @@ def load_day(history_dir, day_str, workspaces, categories):
     if not os.path.exists(path):
         return {
             "workspaces": workspaces, "categories": categories, "buckets": BUCKETS,
-            "branches": BRANCH_WHITELIST, "delayDrivers": DELAY_DRIVERS, "entries": [],
+            "branches": BRANCH_WHITELIST, "delayDrivers": DELAY_DRIVERS,
+            "delayDriverGroups": DELAY_DRIVER_GROUPS, "entries": [],
         }
     with open(path) as f:
         return json.load(f)

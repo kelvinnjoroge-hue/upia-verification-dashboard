@@ -397,7 +397,7 @@ function scheduleAutoRefresh() {
 function decodeEntry(entry) {
   if (!entry) return [];
   return entry.rows.map(row => {
-    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx, branchIdx, delayIdx] = row;
+    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx, branchIdx, delayIdx, groupIdx] = row;
     const responderId = responderIdx != null ? entry.agents[responderIdx] : null;
     return {
       workspace: SNAPSHOT.workspaces[wsIdx],
@@ -410,6 +410,7 @@ function decodeEntry(entry) {
       responderName: (responderId != null && SNAPSHOT.agentDirectory) ? (SNAPSHOT.agentDirectory[String(responderId)] || null) : null,
       branch: (branchIdx != null && SNAPSHOT.branches) ? SNAPSHOT.branches[branchIdx] : null,
       delayDriver: (delayIdx != null && SNAPSHOT.delayDrivers) ? SNAPSHOT.delayDrivers[delayIdx] : null,
+      delayDriverGroup: (groupIdx != null && SNAPSHOT.delayDriverGroups) ? SNAPSHOT.delayDriverGroups[groupIdx] : null,
     };
   });
 }
@@ -683,8 +684,8 @@ function computeAgentBreakdown(records) {
   return rows;
 }
 
-function computeDelayDriverBreakdown(records) {
-  const eligible = records.filter(r => r.delayDriver);
+function computeDelayDriverBreakdown(records, group) {
+  const eligible = records.filter(r => r.delayDriverGroup === group && r.delayDriver);
   const counts = new Map();
   const handling = new Map();
   eligible.forEach(r => {
@@ -707,11 +708,11 @@ function computeDelayDriverBreakdown(records) {
   return { rows, total };
 }
 
-function renderDelayDriverPanel(records) {
-  const { rows, total } = computeDelayDriverBreakdown(records);
+function renderDelayDriverPanel(records, group) {
+  const { rows, total } = computeDelayDriverBreakdown(records, group);
   if (total === 0) {
-    return `<div class="panel"><h4>Delay Driver &mdash; New Loan Verification</h4>
-      <div class="chip-empty">No classified New Loan Verification tickets for this selection yet.
+    return `<div class="panel"><h4>Delay Driver &mdash; ${group}</h4>
+      <div class="chip-empty">No classified ${group} tickets for this selection yet.
       Classification only runs on resolved tickets and catches up gradually (a handful per refresh cycle)
       rather than all at once.</div></div>`;
   }
@@ -724,14 +725,14 @@ function renderDelayDriverPanel(records) {
     <td class="num">${fmtDuration(r.avgHandlingSecs)}</td>
   </tr>`).join('');
   return `<div class="panel">
-    <h4>Delay Driver &mdash; New Loan Verification (${total} resolved ticket(s) classified)</h4>
+    <h4>Delay Driver &mdash; ${group} (${total} resolved ticket(s) classified)</h4>
     ${bars}
     <table class="data-table">
       <thead><tr><th>Delay driver</th><th>Tickets</th><th>Share</th><th>Avg duration</th></tr></thead>
       <tbody>${tableRows}</tbody>
     </table>
     <div class="panel-footnote">Approximate keyword heuristic read from each ticket's conversation thread,
-    not manual case-by-case review. Only resolved/closed/approved New Loan Verification tickets are
+    not manual case-by-case review. Only resolved/closed/approved ${group} tickets are
     classified, and classification catches up gradually after any pause rather than all at once.</div>
   </div>`;
 }
@@ -847,9 +848,11 @@ function wireSearchFilter(inputEl, containerEl, rowSelector) {
 
 function renderExtraSections(filtered) {
   const container = document.getElementById('extraSections');
+  const groups = SNAPSHOT.delayDriverGroups || ['New Loan Verification'];
+  const delayPanels = groups.map(g => renderDelayDriverPanel(filtered, g)).join('');
   container.innerHTML = `
     <div class="section-label">Delay Driver</div>
-    ${renderDelayDriverPanel(filtered)}
+    ${delayPanels}
     <div class="section-label">Branches</div>
     ${renderBranchPanel(filtered)}
     <div class="section-label">Control Agents</div>

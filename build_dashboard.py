@@ -68,7 +68,19 @@ _REQUEST_PACING_SECS = 0.3
 
 CLASSIFICATION_CACHE_NAME = "delay_classifications.json"
 NLV_SUB_CATEGORY = "New Loan Verification"
+DORMANT_WORKSPACE = "KE_UPIA_Dormant Reactivation"
 MAX_NEW_CLASSIFICATIONS_PER_RUN = 150
+
+
+def delay_driver_group(record):
+    """Which delay-driver breakdown panel a ticket belongs to, or None if
+    ineligible. See the org-hosted build_dashboard.py for the full rationale
+    (calibrated against real conversation samples per group)."""
+    if record["workspace"] == "KE_UPIA_Verification" and record["subCategory"] == NLV_SUB_CATEGORY:
+        return "New Loan Verification"
+    if record["workspace"] == DORMANT_WORKSPACE:
+        return "Dormant Reactivation"
+    return None
 
 
 def categorize(subject):
@@ -230,24 +242,28 @@ def prune_classification_cache(cache, retention_days, now):
 
 def classify_delay_drivers(records, base_dir, now):
     cache = prune_classification_cache(load_classification_cache(base_dir), RETENTION_DAYS, now)
-    new_count = 0
+    new_counts = {}
+    total_new = 0
     for r in records:
-        if r["subCategory"] != NLV_SUB_CATEGORY or r["bucket"] != "resolved_approved":
+        group = r["delayDriverGroup"]
+        if group is None or r["bucket"] != "resolved_approved":
             continue
         key = str(r["id"])
         cached = cache.get(key)
         if cached:
             r["delayDriver"] = cached["label"]
             continue
-        if new_count >= MAX_NEW_CLASSIFICATIONS_PER_RUN:
+        if new_counts.get(group, 0) >= MAX_NEW_CLASSIFICATIONS_PER_RUN:
             continue
         text = fetch_conversation_text(r["id"])
         label = classify_delay_driver(text)
         r["delayDriver"] = label
         cache[key] = {"label": label, "classified_at": now.isoformat()}
-        new_count += 1
+        new_counts[group] = new_counts.get(group, 0) + 1
+        total_new += 1
     save_classification_cache(base_dir, cache)
-    print(f"  [delay-driver] classified {new_count} new ticket(s) this run "
+    breakdown = ", ".join(f"{g}: {n}" for g, n in new_counts.items()) or "none"
+    print(f"  [delay-driver] classified {total_new} new ticket(s) this run ({breakdown}) "
           f"(cache now holds {len(cache)} entries)")
     return records
 
@@ -262,7 +278,7 @@ def to_records(tickets, agent_directory):
         resolution_secs = stats.get("resolution_time_in_secs")
         cf = t.get("custom_fields") or {}
         requester = t.get("requester") or {}
-        records.append({
+        rec = {
             "id": t["id"],
             "subject": t.get("subject"),
             "workspace": t["_workspace_name"],
@@ -279,7 +295,9 @@ def to_records(tickets, agent_directory):
             "resolvedAt": resolved_at,
             "handlingSecs": resolution_secs if (resolved_at and resolution_secs is not None) else None,
             "delayDriver": None,
-        })
+        }
+        rec["delayDriverGroup"] = delay_driver_group(rec)
+        records.append(rec)
     return records
 
 
@@ -303,6 +321,7 @@ def write_ticket_listing(records, base_dir, day_str):
                 "resolvedAt": r["resolvedAt"],
                 "handlingSecs": r["handlingSecs"],
                 "delayDriver": r["delayDriver"],
+                "delayDriverGroup": r["delayDriverGroup"],
             }
             for r in records
         ],
@@ -345,6 +364,7 @@ def build_snapshot():
         "buckets": BUCKETS,
         "branches": hstore.BRANCH_WHITELIST,
         "delayDrivers": hstore.DELAY_DRIVERS,
+        "delayDriverGroups": hstore.DELAY_DRIVER_GROUPS,
         "agentDirectory": agent_directory,
         "recent": recent,
         "availableDays": available_days,
