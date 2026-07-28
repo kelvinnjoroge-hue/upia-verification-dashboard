@@ -18,16 +18,22 @@ history/ subdirectory):
 
 Each compact entry: {"t": "<ISO8601 generatedAt, EAT offset>",
                       "agents": [<responder id>, ...],
+                      "subCategories": [<native Freshservice sub_category>, ...],
                       "rows": [[wsIdx, catIdx, bucketIdx, hasResponder(0/1),
                                 hasFirstResponse(0/1), handlingSecsOrNull,
                                 responderIdxOrNull, branchIdxOrNull,
-                                delayDriverIdxOrNull], ...]}
-Rows reference workspaces/categories/buckets/branches/delay-drivers by index
-(not name) and responders by index into that entry's own `agents` list (not
-the raw Freshservice id) purely to keep the encoding short -- none of this is
-an attempt at obfuscation. branchIdx/delayDriverIdx were added later (2026-07)
--- older rows in already-written day-files are exactly 7 elements long;
-decoding code must treat a missing 8th/9th element as null, not error.
+                                delayDriverIdxOrNull, delayDriverGroupIdxOrNull,
+                                subCategoryIdxOrNull], ...]}
+Rows reference workspaces/categories/buckets/branches/delay-drivers/delay-driver-
+groups by index into their respective fixed global lists (not name), and
+responders/sub-categories by index into that entry's own `agents`/
+`subCategories` lists (not the raw value) -- purely to keep the encoding
+short, none of this is an attempt at obfuscation. `subCategories` is a
+per-entry dedup list (like `agents`) rather than a fixed global list because
+native sub_category values are open-ended, unlike the curated branch/delay-
+driver/bucket enums. Fields were added in stages (2026-07); older rows in
+already-written day-files can be shorter than 11 elements -- decoding code
+must treat any missing trailing element as null, not error.
 
 BRANCH_WHITELIST/DELAY_DRIVERS are treated as fixed constants embedded as-is
 into every day-file/snapshot (same as BUCKETS always has been) -- if either
@@ -61,6 +67,7 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
     delay_index = {d: i for i, d in enumerate(DELAY_DRIVERS)}
     group_index = {g: i for i, g in enumerate(DELAY_DRIVER_GROUPS)}
     agent_ids, agent_pos = [], {}
+    subcat_names, subcat_pos = [], {}
     rows = []
     for r in records:
         responder_idx = None
@@ -70,6 +77,13 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
                 agent_pos[rid] = len(agent_ids)
                 agent_ids.append(rid)
             responder_idx = agent_pos[rid]
+        subcat_idx = None
+        sc = r.get("subCategory")
+        if sc:
+            if sc not in subcat_pos:
+                subcat_pos[sc] = len(subcat_names)
+                subcat_names.append(sc)
+            subcat_idx = subcat_pos[sc]
         rows.append([
             ws_index[r["workspace"]],
             cat_index[r["category"]],
@@ -81,8 +95,9 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
             branch_index.get(r.get("branch")),
             delay_index.get(r.get("delayDriver")),
             group_index.get(r.get("delayDriverGroup")),
+            subcat_idx,
         ])
-    return {"t": generated_at_iso, "agents": agent_ids, "rows": rows}
+    return {"t": generated_at_iso, "agents": agent_ids, "subCategories": subcat_names, "rows": rows}
 
 
 def _day_file(history_dir, day_str):

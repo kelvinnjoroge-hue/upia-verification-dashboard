@@ -397,7 +397,7 @@ function scheduleAutoRefresh() {
 function decodeEntry(entry) {
   if (!entry) return [];
   return entry.rows.map(row => {
-    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx, branchIdx, delayIdx, groupIdx] = row;
+    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx, branchIdx, delayIdx, groupIdx, subCatIdx] = row;
     const responderId = responderIdx != null ? entry.agents[responderIdx] : null;
     return {
       workspace: SNAPSHOT.workspaces[wsIdx],
@@ -411,6 +411,7 @@ function decodeEntry(entry) {
       branch: (branchIdx != null && SNAPSHOT.branches) ? SNAPSHOT.branches[branchIdx] : null,
       delayDriver: (delayIdx != null && SNAPSHOT.delayDrivers) ? SNAPSHOT.delayDrivers[delayIdx] : null,
       delayDriverGroup: (groupIdx != null && SNAPSHOT.delayDriverGroups) ? SNAPSHOT.delayDriverGroups[groupIdx] : null,
+      subCategory: (subCatIdx != null && entry.subCategories) ? entry.subCategories[subCatIdx] : null,
     };
   });
 }
@@ -737,6 +738,38 @@ function renderDelayDriverPanel(records, group) {
   </div>`;
 }
 
+// "Ticket drivers" is a distinct, simpler metric from the conversation-based
+// Delay Driver classifiers above -- just which native sub_category values are
+// generating the most ticket volume in a workspace. Unlike delay-driver
+// classification (which needs substantive back-and-forth to read anything
+// into), this works for any workspace since it's a plain count, so it covers
+// the 2 workspaces the delay-driver classifier deliberately excludes
+// (Edit Bio Data, Reference Check) plus Dormant Reactivation.
+const TICKET_DRIVER_WORKSPACES = ['KE_UPIA_Edit Bio Data', 'KE_UPIA_Dormant Reactivation', 'KE_UPIA_Reference Check'];
+
+function computeTicketDriverBreakdown(records, workspace) {
+  const scoped = records.filter(r => r.workspace === workspace && r.subCategory);
+  const counts = new Map();
+  scoped.forEach(r => counts.set(r.subCategory, (counts.get(r.subCategory) || 0) + 1));
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  return { top: sorted.slice(0, 2), total: scoped.length };
+}
+
+function renderTicketDriverPanel(records, workspace) {
+  const { top, total } = computeTicketDriverBreakdown(records, workspace);
+  if (top.length === 0) {
+    return `<div class="panel"><h4>${workspace} &mdash; Top Ticket Drivers</h4>
+      <div class="chip-empty">No sub-category data for this selection.</div></div>`;
+  }
+  const maxCount = top[0][1];
+  const bars = top.map(([name, count]) => barRow(name, count, maxCount, 'var(--green)')).join('');
+  return `<div class="panel">
+    <h4>${workspace} &mdash; Top 2 Ticket Drivers</h4>
+    ${bars}
+    <div class="panel-footnote">By native Freshservice sub-category, out of ${total} ticket(s) with a recorded sub-category in this selection.</div>
+  </div>`;
+}
+
 function renderBranchPanel(records) {
   const { sorted, excluded, total } = computeBranchBreakdown(records);
   if (sorted.length === 0) {
@@ -850,9 +883,11 @@ function renderExtraSections(filtered) {
   const container = document.getElementById('extraSections');
   const groups = SNAPSHOT.delayDriverGroups || ['New Loan Verification'];
   const delayPanels = groups.map(g => renderDelayDriverPanel(filtered, g)).join('');
+  const ticketDriverPanels = TICKET_DRIVER_WORKSPACES.map(w => renderTicketDriverPanel(filtered, w)).join('');
   container.innerHTML = `
     <div class="section-label">Delay Driver</div>
     ${delayPanels}
+    ${ticketDriverPanels}
     <div class="section-label">Branches</div>
     ${renderBranchPanel(filtered)}
     <div class="section-label">Control Agents</div>
