@@ -272,7 +272,7 @@ body { padding: 20px 16px 48px; }
   border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 12px;
   font-family: inherit;
 }
-.chip-scroll { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; }
+.chip-scroll { max-height: 220px; overflow-y: auto; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; }
 .chip-columns { columns: 2 190px; column-gap: 16px; }
 .chip-row {
   display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
@@ -397,7 +397,7 @@ function scheduleAutoRefresh() {
 function decodeEntry(entry) {
   if (!entry) return [];
   return entry.rows.map(row => {
-    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx, branchIdx, delayIdx, groupIdx, subCatIdx] = row;
+    const [wsIdx, catIdx, bucketIdx, hasResponder, hasFirstResponse, handlingSecs, responderIdx, branchIdx, delayIdx, groupIdx, subCatIdx, statusPending] = row;
     const responderId = responderIdx != null ? entry.agents[responderIdx] : null;
     return {
       workspace: SNAPSHOT.workspaces[wsIdx],
@@ -412,6 +412,7 @@ function decodeEntry(entry) {
       delayDriver: (delayIdx != null && SNAPSHOT.delayDrivers) ? SNAPSHOT.delayDrivers[delayIdx] : null,
       delayDriverGroup: (groupIdx != null && SNAPSHOT.delayDriverGroups) ? SNAPSHOT.delayDriverGroups[groupIdx] : null,
       subCategory: (subCatIdx != null && entry.subCategories) ? entry.subCategories[subCatIdx] : null,
+      statusPending: !!statusPending,
     };
   });
 }
@@ -650,20 +651,50 @@ function barRow(label, count, maxCount, color) {
   </div>`;
 }
 
-function chipRow(name, count) {
-  return `<div class="chip-row"><span class="chip-name">${name}</span><span class="chip-count">${count}</span></div>`;
-}
-
 function computeBranchBreakdown(records) {
+  // "In progress" here excludes tickets awaiting a reply (statusPending) --
+  // those get their own "pending branch feedback" column instead, so a
+  // ticket is never counted in both. This is a narrower definition than the
+  // top-level Volume/Outcomes/Workforce tiles' "in progress" (which still
+  // includes pending) -- deliberate, since only this table shows both
+  // columns side by side and needs to avoid double-counting.
   const verificationOnly = records.filter(r => r.workspace === 'KE_UPIA_Verification');
-  const counts = new Map();
+  const stats = new Map();
   let excluded = 0;
+  let totalReturned = 0, totalDeclined = 0;
   verificationOnly.forEach(r => {
-    if (r.branch) counts.set(r.branch, (counts.get(r.branch) || 0) + 1);
-    else excluded++;
+    if (!r.branch) { excluded++; return; }
+    if (!stats.has(r.branch)) {
+      stats.set(r.branch, {
+        received: 0, resolvedApproved: 0, returned: 0, declined: 0,
+        inProgress: 0, idle: 0, pendingBranchFeedback: 0, unallocated: 0,
+        handlingSum: 0, handlingCount: 0,
+      });
+    }
+    const s = stats.get(r.branch);
+    s.received++;
+    if (r.bucket === 'resolved_approved') s.resolvedApproved++;
+    else if (r.bucket === 'returned') { s.returned++; totalReturned++; }
+    else if (r.bucket === 'declined') { s.declined++; totalDeclined++; }
+    else if (r.bucket === 'in_progress') {
+      if (r.statusPending) {
+        s.pendingBranchFeedback++;
+      } else {
+        s.inProgress++;
+        if (r.hasResponder && !r.hasFirstResponse) s.idle++;
+      }
+    }
+    if (!r.hasResponder) s.unallocated++;
+    if (r.handlingSecs != null) { s.handlingSum += r.handlingSecs; s.handlingCount++; }
   });
-  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  return { sorted, excluded, total: verificationOnly.length };
+  const rows = [...stats.entries()].map(([name, s]) => ({
+    name, ...s,
+    returnedShare: totalReturned ? (s.returned / totalReturned * 100) : 0,
+    declinedShare: totalDeclined ? (s.declined / totalDeclined * 100) : 0,
+    avgHandlingSecs: s.handlingCount ? s.handlingSum / s.handlingCount : null,
+  }));
+  rows.sort((a, b) => b.received - a.received);
+  return { rows, excluded, total: verificationOnly.length };
 }
 
 function computeAgentBreakdown(records) {
@@ -671,14 +702,18 @@ function computeAgentBreakdown(records) {
   records.forEach(r => {
     if (!r.hasResponder) return;
     const name = r.responderName || `Agent ${r.responder}`;
-    if (!stats.has(name)) stats.set(name, { allocated: 0, resolvedApproved: 0, handlingSum: 0, handlingCount: 0 });
+    if (!stats.has(name)) stats.set(name, { allocated: 0, resolvedApproved: 0, returned: 0, declined: 0, inProgress: 0, handlingSum: 0, handlingCount: 0 });
     const s = stats.get(name);
     s.allocated++;
     if (r.bucket === 'resolved_approved') s.resolvedApproved++;
+    else if (r.bucket === 'returned') s.returned++;
+    else if (r.bucket === 'declined') s.declined++;
+    else if (r.bucket === 'in_progress') s.inProgress++;
     if (r.handlingSecs != null) { s.handlingSum += r.handlingSecs; s.handlingCount++; }
   });
   const rows = [...stats.entries()].map(([name, s]) => ({
     name, allocated: s.allocated, resolvedApproved: s.resolvedApproved,
+    returned: s.returned, declined: s.declined, inProgress: s.inProgress,
     avgHandlingSecs: s.handlingCount ? s.handlingSum / s.handlingCount : null,
   }));
   rows.sort((a, b) => b.allocated - a.allocated);
@@ -771,24 +806,51 @@ function renderTicketDriverPanel(records, workspace) {
 }
 
 function renderBranchPanel(records) {
-  const { sorted, excluded, total } = computeBranchBreakdown(records);
-  if (sorted.length === 0) {
+  const { rows, excluded, total } = computeBranchBreakdown(records);
+  if (rows.length === 0) {
     return `<div class="panel"><h4>Branches by Ticket Volume</h4>
       <div class="chip-empty">No branch data for this selection &mdash; only KE_UPIA_Verification
       tickets carry a branch field.</div></div>`;
   }
-  const top = sorted.slice(0, 10);
-  const maxCount = top[0][1];
-  const bars = top.map(([name, count]) => barRow(name, count, maxCount, 'var(--navy)')).join('');
-  const chips = sorted.map(([name, count]) => chipRow(name, count)).join('');
+  const top = rows.slice(0, 10);
+  const maxCount = top[0].received;
+  const bars = top.map(r => barRow(r.name, r.received, maxCount, 'var(--navy)')).join('');
+  const tableRows = rows.map(r => `<tr>
+    <td>${r.name}</td>
+    <td class="num">${r.received}</td>
+    <td class="num">${r.resolvedApproved}</td>
+    <td class="num">${r.returned}</td>
+    <td class="num">${r.returned ? r.returnedShare.toFixed(1) + '%' : '&mdash;'}</td>
+    <td class="num">${r.declined}</td>
+    <td class="num">${r.declined ? r.declinedShare.toFixed(1) + '%' : '&mdash;'}</td>
+    <td class="num">${r.inProgress}</td>
+    <td class="num">${r.idle}</td>
+    <td class="num">${r.pendingBranchFeedback}</td>
+    <td class="num">${r.unallocated}</td>
+    <td class="num">${fmtDuration(r.avgHandlingSecs)}</td>
+  </tr>`).join('');
   return `<div class="panel">
-    <h4>Branches by Ticket Volume (${sorted.length} branches)</h4>
+    <h4>Branches by Ticket Volume (${rows.length} branches)</h4>
     ${bars}
-    <p class="panel-subhead">All ${sorted.length} branches</p>
+    <p class="panel-subhead">All ${rows.length} branches</p>
     <input class="chip-search" data-chip-target="branch" type="text" placeholder="Filter branches&hellip;">
-    <div class="chip-scroll"><div class="chip-columns" id="branchChips">${chips}</div></div>
+    <div class="chip-scroll" style="max-height:320px;">
+      <table class="data-table" id="branchTable">
+        <thead><tr>
+          <th>Branch</th><th>Received</th><th>Resolved/Approved</th>
+          <th>Returned</th><th>Returned share</th><th>Declined</th><th>Declined share</th>
+          <th>In progress</th><th>Idle</th><th>Pending branch feedback</th>
+          <th>Unallocated</th><th>Avg handling time</th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>
     <div class="panel-footnote">${excluded} of ${total} Verification ticket(s) had no branch recorded
-    or a value that didn't match the approved branch list, and are excluded above.</div>
+    or a value that didn't match the approved branch list, and are excluded above. &ldquo;Returned
+    share&rdquo;/&ldquo;Declined share&rdquo; are each branch's percentage of all Returned/Declined tickets
+    in this selection (not a percentage of that branch's own volume) &mdash; same convention as the Delay
+    Driver shares above. &ldquo;In progress&rdquo; excludes tickets awaiting a reply, shown separately under
+    &ldquo;Pending branch feedback.&rdquo;</div>
   </div>`;
 }
 
@@ -806,6 +868,9 @@ function renderAgentPanel(records) {
     <td class="num">${r.allocated}</td>
     <td class="num">${fmtDuration(r.avgHandlingSecs)}</td>
     <td class="num">${r.resolvedApproved}</td>
+    <td class="num">${r.returned}</td>
+    <td class="num">${r.declined}</td>
+    <td class="num">${r.inProgress}</td>
   </tr>`).join('');
   return `<div class="panel">
     <h4>Control Agents by Ticket Volume (${rows.length} agents)</h4>
@@ -814,7 +879,10 @@ function renderAgentPanel(records) {
     <input class="chip-search" data-chip-target="agent" type="text" placeholder="Filter agents&hellip;">
     <div class="chip-scroll" style="max-height:280px;">
       <table class="data-table" id="agentTable">
-        <thead><tr><th>Control agent</th><th>Total tickets allocated</th><th>Avg resolution time</th><th>Total resolved/approved</th></tr></thead>
+        <thead><tr>
+          <th>Control agent</th><th>Total tickets allocated</th><th>Avg resolution time</th>
+          <th>Total resolved/approved</th><th>Total returned</th><th>Total declined</th><th>Total in progress</th>
+        </tr></thead>
         <tbody>${tableRows}</tbody>
       </table>
     </div>
@@ -895,7 +963,7 @@ function renderExtraSections(filtered) {
     <div class="section-label">Ticket Listing</div>
     ${renderTicketListingSection()}
   `;
-  wireSearchFilter(container.querySelector('.chip-search[data-chip-target="branch"]'), document.getElementById('branchChips'), '.chip-row');
+  wireSearchFilter(container.querySelector('.chip-search[data-chip-target="branch"]'), document.getElementById('branchTable'), 'tbody tr');
   wireSearchFilter(container.querySelector('.chip-search[data-chip-target="agent"]'), document.getElementById('agentTable'), 'tbody tr');
   const listingLink = document.getElementById('ticketListingLink');
   if (listingLink) {

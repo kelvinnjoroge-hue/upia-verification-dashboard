@@ -295,6 +295,7 @@ def to_records(tickets, agent_directory):
             "resolvedAt": resolved_at,
             "handlingSecs": resolution_secs if (resolved_at and resolution_secs is not None) else None,
             "delayDriver": None,
+            "statusPending": status == ST_PENDING,
         }
         rec["delayDriverGroup"] = delay_driver_group(rec)
         records.append(rec)

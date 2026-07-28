@@ -23,7 +23,7 @@ Each compact entry: {"t": "<ISO8601 generatedAt, EAT offset>",
                                 hasFirstResponse(0/1), handlingSecsOrNull,
                                 responderIdxOrNull, branchIdxOrNull,
                                 delayDriverIdxOrNull, delayDriverGroupIdxOrNull,
-                                subCategoryIdxOrNull], ...]}
+                                subCategoryIdxOrNull, statusPending(0/1)], ...]}
 Rows reference workspaces/categories/buckets/branches/delay-drivers/delay-driver-
 groups by index into their respective fixed global lists (not name), and
 responders/sub-categories by index into that entry's own `agents`/
@@ -31,8 +31,16 @@ responders/sub-categories by index into that entry's own `agents`/
 short, none of this is an attempt at obfuscation. `subCategories` is a
 per-entry dedup list (like `agents`) rather than a fixed global list because
 native sub_category values are open-ended, unlike the curated branch/delay-
-driver/bucket enums. Fields were added in stages (2026-07); older rows in
-already-written day-files can be shorter than 11 elements -- decoding code
+driver/bucket enums. `statusPending` is a plain 0/1 flag (not an index) --
+whether the ticket's raw Freshservice status is "Pending" ("Awaiting your
+Reply"), which the `bucket` field alone can't distinguish since bucket_for()
+lumps Open/Pending/Ops Approval together into "in_progress". Kept separate
+from `bucket` rather than splitting "in_progress" itself, so the top-level
+Volume/Outcomes/Workforce tiles' existing meaning of "in progress" doesn't
+silently change -- only the branch breakdown table (which shows both an
+"in progress" and a "pending branch feedback" column side by side) needs the
+distinction. Fields were added in stages (2026-07); older rows in
+already-written day-files can be shorter than 12 elements -- decoding code
 must treat any missing trailing element as null, not error.
 
 BRANCH_WHITELIST/DELAY_DRIVERS are treated as fixed constants embedded as-is
@@ -96,6 +104,7 @@ def compact_entry(generated_at_iso, records, workspaces, categories):
             delay_index.get(r.get("delayDriver")),
             group_index.get(r.get("delayDriverGroup")),
             subcat_idx,
+            1 if r.get("statusPending") else 0,
         ])
     return {"t": generated_at_iso, "agents": agent_ids, "subCategories": subcat_names, "rows": rows}
 
