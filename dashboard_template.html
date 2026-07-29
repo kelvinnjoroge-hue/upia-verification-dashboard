@@ -343,7 +343,11 @@ body { padding: 20px 16px 48px; }
 
 <script>
 const SNAPSHOT = JSON.parse(atob("__SNAPSHOT_B64__"));
-const CAN_FETCH_HISTORY = /(^|\.)github\.io$/.test(location.hostname);
+// Matches both the raw GitHub Pages host and the custom domain fronting it
+// (dashboard.4g-capital.com, added so users don't see the personal-account
+// github.io URL) -- both are the real static-hosted mirror with no fetch()
+// restriction, unlike the claude.ai Artifact's strict CSP.
+const CAN_FETCH_HISTORY = /(^|\.)github\.io$/.test(location.hostname) || location.hostname === 'dashboard.4g-capital.com';
 
 const state = {
   workspace: new Set(SNAPSHOT.workspaces),

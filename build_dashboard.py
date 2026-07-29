@@ -41,7 +41,7 @@ DOMAIN = os.environ.get("FS_DOMAIN", "https://4gcapital.freshservice.com")
 HISTORY_DIR = os.path.join(HERE, "history")
 TEMPLATE_PATH = os.path.join(HERE, "dashboard_template.html")
 OUTPUT_PATH = os.path.join(HERE, "index.html")
-MIRROR_URL = "https://kelvinnjoroge-hue.github.io/upia-verification-dashboard/"
+MIRROR_URL = "https://dashboard.4g-capital.com/"
 
 WORKSPACES = [
     {"id": 15, "name": "KE_UPIA_Verification"},
