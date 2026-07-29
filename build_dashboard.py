@@ -41,7 +41,12 @@ DOMAIN = os.environ.get("FS_DOMAIN", "https://4gcapital.freshservice.com")
 HISTORY_DIR = os.path.join(HERE, "history")
 TEMPLATE_PATH = os.path.join(HERE, "dashboard_template.html")
 OUTPUT_PATH = os.path.join(HERE, "index.html")
-MIRROR_URL = "https://dashboard.4g-capital.com/"
+# TODO: switch to "https://dashboard.4g-capital.com/" once the DNS CNAME
+# record (dashboard.4g-capital.com -> kelvinnjoroge-hue.github.io, in Route 53)
+# is live -- attempting the custom domain before DNS resolved caused GitHub
+# Pages to 301-redirect the working github.io URL to the not-yet-resolving
+# custom domain, taking the site offline, so this was reverted (2026-07-29).
+MIRROR_URL = "https://kelvinnjoroge-hue.github.io/upia-verification-dashboard/"
 
 WORKSPACES = [
     {"id": 15, "name": "KE_UPIA_Verification"},
